@@ -27,6 +27,7 @@ struct xapian_fts_backend
 {
         struct fts_backend backend;
         char * path;
+	char * base_path;
 	long partial,full;
 	bool attachments;
 	bool doexpunge;
@@ -83,6 +84,7 @@ static int fts_backend_xapian_init(struct fts_backend *_backend, const char **er
 
 	backend->guid = NULL;
 	backend->path = NULL;
+	backend->base_path = NULL;
 	backend->old_guid = NULL;
 	backend->old_boxname = NULL;
 	backend->attachments = false;
@@ -119,6 +121,10 @@ static int fts_backend_xapian_init(struct fts_backend *_backend, const char **er
 		{
 			if(atol(*tmp + 12)>0) backend->attachments=true;
 		}
+		else if (strncmp(*tmp, "base_path=", 10) == 0)
+		{
+			backend->base_path = i_strdup(*tmp + 10);
+		}
 		else 
 		{
             		i_error("FTS Xapian: Invalid setting: %s", *tmp);
@@ -147,16 +153,37 @@ static int fts_backend_xapian_init(struct fts_backend *_backend, const char **er
         	return -1;
     	}
 
-	const char * path = mailbox_list_get_root_forced(_backend->ns->list, MAILBOX_LIST_PATH_TYPE_INDEX);
-	backend->path = i_strconcat(path, "/" XAPIAN_FILE_PREFIX, NULL);
-
-	struct stat sb;
-	if(!( (stat(backend->path, &sb)==0) && S_ISDIR(sb.st_mode)))
+	if (backend->base_path)
 	{
-		if (mailbox_list_mkdir_root(backend->backend.ns->list, backend->path, MAILBOX_LIST_PATH_TYPE_INDEX) < 0)
+		backend->path = i_strconcat(backend->base_path, "/", _backend->ns->user->username, NULL);
+		struct stat sb;
+		if (!(stat(backend->path, &sb) == 0 && S_ISDIR(sb.st_mode)))
 		{
-			i_error("FTS Xapian: can not create '%s'",backend->path);
-                	return -1;
+			if (mkdir(backend->path, 0777) < 0)
+			{
+				i_error("FTS Xapian: can not create '%s'", backend->path);
+				return -1;
+			}
+		}
+		else if (sb.st_uid != _backend->ns->user->uid)
+		{
+			i_error("FTS Xapian: Directory has wrong owner '%s'", backend->path);
+			return -1;
+		}
+	}
+	else
+	{
+		const char * path = mailbox_list_get_root_forced(_backend->ns->list, MAILBOX_LIST_PATH_TYPE_INDEX);
+		backend->path = i_strconcat(path, "/" XAPIAN_FILE_PREFIX, NULL);
+
+		struct stat sb;
+		if(!( (stat(backend->path, &sb)==0) && S_ISDIR(sb.st_mode)))
+		{
+			if (mailbox_list_mkdir_root(backend->backend.ns->list, backend->path, MAILBOX_LIST_PATH_TYPE_INDEX) < 0)
+			{
+				i_error("FTS Xapian: can not create '%s'",backend->path);
+				return -1;
+			}
 		}
 	}
 

@@ -98,6 +98,12 @@ Example: "<john@doe>" will create joh, ohn, hn@, ..., john@d, ohn@do, ..., and f
 Set "verbose=1" to see verbose messages in the log, "verbose=2" for debug
 Set "attachments=1" if you want to index attachments (this works only for text attachments)
 
+Set "base_path=/path/..." to specify a base path where the Xapian index
+files are stored. Under this directory a directory for each user is created.
+The base path directory must be writable for all users (such as 1777 mode).
+If a base path is not given, the index files will be stored in the users
+Mail directory.
+
 Restart Dovecot:
 
 ```
