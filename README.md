@@ -38,6 +38,11 @@ apt-get install git xapian-core libicu-dev
 Archlinux:
 pacman -S dovecot
 pacman -S xapian-core icu
+
+FreeBSD:
+pkg install xapian-core
+pkg install xapian-bindings
+pkg install icu
 ```
 
 Clone this project:
@@ -119,6 +124,12 @@ doveadm index -A -q \*
 
 *The first index will re-index all emails, therefore may take a while.*
 
+
+
+You shall put in a cron the following command (for daily run for instance) :
+```
+doveadm fts optimize -A
+```
 
 
 Debugging/Support
