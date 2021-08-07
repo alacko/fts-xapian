@@ -197,17 +197,6 @@ dnl
 
 AC_DEFUN([AC_CC_RETPOLINE],[
     AC_REQUIRE([gl_UNKNOWN_WARNINGS_ARE_ERRORS])
-    AS_IF([test "$enable_hardening" = yes], [
-      case "$host" in
-        *)
-          gl_COMPILER_OPTION_IF([-mfunction-return=thunk -mindirect-branch=thunk], [
-            CFLAGS="$CFLAGS -mfunction-return=thunk -mindirect-branch=thunk"
-            ],
-            [],
-            [AC_LANG_PROGRAM()]
-          )
-      esac
-    ])
 ])
 
 dnl
@@ -458,14 +447,6 @@ dnl with or without modifications, as long as this notice is preserved.
 
 dnl From Simon Josefsson
 
-# gl_AS_VAR_APPEND(VAR, VALUE)
-# ----------------------------
-# Provide the functionality of AS_VAR_APPEND if Autoconf does not have it.
-m4_ifdef([AS_VAR_APPEND],
-[m4_copy([AS_VAR_APPEND], [gl_AS_VAR_APPEND])],
-[m4_define([gl_AS_VAR_APPEND],
-[AS_VAR_SET([$1], [AS_VAR_GET([$1])$2])])])
-
 
 # gl_COMPILER_OPTION_IF(OPTION, [IF-SUPPORTED], [IF-NOT-SUPPORTED],
 #                       [PROGRAM = AC_LANG_PROGRAM()])
@@ -486,8 +467,6 @@ esac
 m4_pushdef([gl_Positive], [$gl_positive])])dnl
 AC_CACHE_CHECK([whether _AC_LANG compiler handles $1], m4_defn([gl_Warn]), [
   gl_save_compiler_FLAGS="$gl_Flags"
-  gl_AS_VAR_APPEND(m4_defn([gl_Flags]),
-    [" $gl_unknown_warnings_are_errors ]m4_defn([gl_Positive])["])
   AC_LINK_IFELSE([m4_default([$4], [AC_LANG_PROGRAM([])])],
                  [AS_VAR_SET(gl_Warn, [yes])],
                  [AS_VAR_SET(gl_Warn, [no])])
@@ -497,33 +476,6 @@ AS_VAR_IF(gl_Warn, [yes], [$2], [$3])
 m4_popdef([gl_Positive])dnl
 AS_VAR_POPDEF([gl_Flags])dnl
 AS_VAR_POPDEF([gl_Warn])dnl
-])
-
-# gl_UNKNOWN_WARNINGS_ARE_ERRORS
-# ------------------------------
-# Clang doesn't complain about unknown warning options unless one also
-# specifies -Wunknown-warning-option -Werror.  Detect this.
-AC_DEFUN([gl_UNKNOWN_WARNINGS_ARE_ERRORS],
-[gl_COMPILER_OPTION_IF([-Werror -Wunknown-warning-option],
-   [gl_unknown_warnings_are_errors='-Wunknown-warning-option -Werror'],
-   [gl_unknown_warnings_are_errors=])])
-
-# gl_WARN_ADD(OPTION, [VARIABLE = WARN_CFLAGS],
-#             [PROGRAM = AC_LANG_PROGRAM()])
-# ---------------------------------------------
-# Adds parameter to WARN_CFLAGS if the compiler supports it when
-# compiling PROGRAM.  For example, gl_WARN_ADD([-Wparentheses]).
-#
-# If VARIABLE is a variable name, AC_SUBST it.
-AC_DEFUN([gl_WARN_ADD],
-[AC_REQUIRE([gl_UNKNOWN_WARNINGS_ARE_ERRORS])
-gl_COMPILER_OPTION_IF([$1],
-  [gl_AS_VAR_APPEND(m4_if([$2], [], [[WARN_CFLAGS]], [[$2]]), [" $1"])],
-  [],
-  [$3])
-m4_ifval([$2],
-         [AS_LITERAL_IF([$2], [AC_SUBST([$2])])],
-         [AC_SUBST([WARN_CFLAGS])])dnl
 ])
 
 # Local Variables:

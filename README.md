@@ -27,22 +27,22 @@ You will need to configure properly [Users Home Directories](https://wiki.doveco
 Installing the Dovecot plugin
 -----------------------------
 
-First install the following packages, or equivalent for your operating system. 
+First install the following packages, or equivalent for your operating system.
 
 ```
 Ubuntu:
-apt-get build-dep dovecot-core
-apt-get install dovecot-dev
-apt-get install git xapian-core libicu-dev
+apt-get build-dep dovecot-core 
+apt-get install dovecot-dev git libxapian-dev libicu-dev
 
 Archlinux:
 pacman -S dovecot
-pacman -S xapian-core icu
+pacman -S xapian-core icu git
 
 FreeBSD:
 pkg install xapian-core
 pkg install xapian-bindings
 pkg install icu
+pkg install git
 ```
 
 Clone this project:
@@ -52,7 +52,7 @@ git clone https://github.com/grosjo/fts-xapian
 cd fts-xapian
 ```
 
-Compile and install the plugin. 
+Compile and install the plugin.
 
 ```
 autoreconf -vi
@@ -62,7 +62,7 @@ sudo make install
 ```
 
 Replace /path/to/dovecot by the actual path to 'dovecot-config'.
-Type 'locate dovecot-config' in a shell to figure this out. On ArchLinux , it is /usr/lib/dovecot. 
+Type 'locate dovecot-config' in a shell to figure this out. On ArchLinux , it is /usr/lib/dovecot.
 
 For specific configuration, you may have to 'export PKG_CONFIG_PATH=...'. To check that, type 'pkg-config --cflags-only-I icu-uc icu-io icu-i18n', it shall return no error.
 
@@ -70,38 +70,52 @@ The module will be placed into the module directory of your dovecot configuratio
 
 Update your dovecot.conf file with something similar to:
 
+(Example in [conf.d/90-fts.conf](https://github.com/grosjo/fts-xapian/blob/master/contrib/conf.d/90-fts.conf) )
+
 ```
-mail_plugins = fts fts_xapian (...)
+mail_plugins = (...) fts fts_xapian
 
 (...)
 
 plugin {
-	plugin = fts fts_xapian (...)
+    fts = xapian
+    fts_xapian = partial=3 full=20 verbose=0
 
-	fts = xapian
-	fts_xapian = partial=3 full=20 attachments=0 verbose=0
+    fts_autoindex = yes
+    fts_enforced = yes
 
-	fts_autoindex = yes
-	fts_enforced = yes
-	
-	fts_autoindex_exclude = \Trash
-(...)
+    fts_autoindex_exclude = \Trash
+
+    # Index attachements
+    fts_decoder = decode2text
 }
 
-(...)
 service indexer-worker {
-	vsz_limit = 2G // or above (or 0 if you have rather large memory usable on your server, which is preferred for performance) 
+    # Increase vsz_limit to 2GB or above.
+    # Or 0 if you have rather large memory usable on your server, which is preferred for performance)
+    vsz_limit = 2G
 }
-(...)
 
+service decode2text {
+    executable = script /usr/libexec/dovecot/decode2text.sh
+    user = dovecot
+    unix_listener decode2text {
+        mode = 0666
+    }
+}
 ```
-Partial & full parameters : 3 and 20 are the NGram values for header fields, which means the keywords created for fields (To, Cc, ...) are between 3 and 20 chars long.
-Full words are also added by default (if not longer than 245 chars, which is the limit of Xapian capability).
 
-Example: "<john@doe>" will create joh, ohn, hn@, ..., john@d, ohn@do, ..., and finally john@doe as searchable keywords.
+Indexing options
+----------------
 
-Set "verbose=1" to see verbose messages in the log, "verbose=2" for debug
-Set "attachments=1" if you want to index attachments (this works only for text attachments)
+| Option         | Description                    | Possible values                      | Default value |
+|----------------|--------------------------------|--------------------------------------|---------------|
+| partial & full | NGram values for header fields | between 3 and 20 characters          | 3 & 20        |
+| verbose        | Logs verbosity                 | 0 (silent), 1 (verbose) or 2 (debug) | 0             |
+
+
+Base Path
+---------
 
 Set "base_path=/path/..." to specify a base path where the Xapian index
 files are stored. Under this directory a directory for each user is created.
@@ -109,25 +123,37 @@ The base path directory must be writable for all users (such as 1777 mode).
 If a base path is not given, the index files will be stored in the users
 Mail directory.
 
-Restart Dovecot:
+NGrams details
+--------------
 
+The partial & full parameters are the NGram values for header fields, which means the keywords created for fields (To,
+Cc, ...) are between 3 and 20 chars long. Full words are also added by default (if not longer than 245 chars, which is
+the limit of Xapian capability).
+
+Example: "<john@doe>" will create joh, ohn, hn@, ..., john@d, ohn@do, ..., and finally john@doe as searchable keywords.
+
+Index updating
+--------------
+
+Just restart Dovecot:
+
+```sh
+sudo service restart dovecot
 ```
-sudo servicectl restart dovecot
-```
 
+If this is not a fresh install of dovecot, you need to re-index your mailboxes:
 
-If this is not a fresh install of dovecot, you need to re-index your mailboxes
-
-```
+```sh
 doveadm index -A -q \*
 ```
 
-*The first index will re-index all emails, therefore may take a while.*
-
-
+- With argument `-A`, it will re-index all mailboxes, therefore may take a while.
+- With argument `-q`, doveadm queues the indexing to be run by indexer process.
+  Remove `-q` if you want to index immediately.
 
 You shall put in a cron the following command (for daily run for instance) :
-```
+
+```sh
 doveadm fts optimize -A
 ```
 
@@ -136,5 +162,7 @@ Debugging/Support
 -----------------
 
 Please submit requests/bugs via the [GitHub issue tracker](https://github.com/grosjo/fts-xapian/issues).
+
+A Matrix Room exists also at : #xapian-dovecot:grosjo.net
 
 Thanks to Aki Tuomi <aki.tuomi@open-xchange.com>, Stephan Bosch <stephan@rename-it.nl>, Paul Hecker <paul@iwascoding.com>
