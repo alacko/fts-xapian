@@ -30,44 +30,8 @@ AC_DEFUN([AC_CC_D_FORTIFY_SOURCE],[
 dnl * gcc specific options
 AC_DEFUN([DC_DOVECOT_CFLAGS],[
   AS_IF([test "x$ac_cv_c_compiler_gnu" = "xyes"], [
-        dnl -Wcast-qual -Wcast-align -Wconversion -Wunreachable-code # too many warnings
-        dnl -Wstrict-prototypes -Wredundant-decls # may give warnings in some systems
-        dnl -Wmissing-format-attribute -Wmissing-noreturn -Wwrite-strings # a couple of warnings
-        CFLAGS="$CFLAGS -Wall -W -Wmissing-prototypes -Wmissing-declarations -Wpointer-arith -Wchar-subscripts -Wformat=2 -Wbad-function-cast"
-
-        AS_IF([test "$have_clang" = "yes"], [
-          AC_TRY_COMPILE([
-          #if __clang_major__ > 3 || (__clang_major__ == 3 && __clang_minor__ >= 3)
-          #  error new clang
-          #endif
-          ],,,[
-            dnl clang 3.3+ unfortunately this gives warnings with hash.h
-            CFLAGS="$CFLAGS -Wno-duplicate-decl-specifier"
-          ])
-        ], [
-          dnl This is simply to avoid warning when building strftime() wrappers..
-          CFLAGS="$CFLAGS -fno-builtin-strftime"
-        ])
-
-        AC_TRY_COMPILE([
-        #if __GNUC__ < 4
-        #  error old gcc
-        #endif
-        ],,[
-          dnl gcc4
-          CFLAGS="$CFLAGS -Wstrict-aliasing=2"
-        ])
-
-        dnl Use std=gnu99 if we have new enough gcc
-        old_cflags=$CFLAGS
-        CFLAGS="-std=gnu99"
-        AC_TRY_COMPILE([
-        ],, [
-          CFLAGS="$CFLAGS $old_cflags"
-        ], [
-          CFLAGS="$old_cflags"
-        ])
-
+        dnl Use gcc support for C99, available since 4.5.0 [2010-04-14]
+        CFLAGS="$CFLAGS -std=gnu99"
   ])
   AS_IF([test "$have_clang" = "yes"], [
     dnl clang specific options
@@ -332,7 +296,7 @@ AC_DEFUN([DC_DOVECOT],[
 	)
 
 	AC_ARG_WITH(dovecot-install-dirs,
-		[AC_HELP_STRING([--with-dovecot-install-dirs],
+		[AS_HELP_STRING([--with-dovecot-install-dirs],
 		[Use install directories configured for Dovecot (default)])],
 	AS_IF([test x$withval = xno], [
 		use_install_dirs=no

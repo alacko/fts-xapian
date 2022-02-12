@@ -11,30 +11,21 @@ extern "C" {
 #include <unicode/translit.h>
 #include <sys/time.h>
 
-#define XAPIAN_FILE_PREFIX "xapian-indexes"
-#define XAPIAN_TERM_SIZELIMIT 245L
-#define XAPIAN_COMMIT_ENTRIES 1000000L
-#define XAPIAN_COMMIT_TIMEOUT 300L
-#define XAPIAN_WILDCARD "wldcrd"
-#define XAPIAN_EXPUNGE_HEADER 9
-#define XAPIAN_MIN_RAM 200L
+#include <sqlite3.h>
 
-#define HDRS_NB 11
-static const char * hdrs_emails[HDRS_NB] = { "uid", "subject", "from", "to",  "cc",  "bcc",  "messageid", "listid", "body", "expungeheader",	""  };
-static const char * hdrs_xapian[HDRS_NB] = { "Q",   "S",       "A",    "XTO", "XCC", "XBCC", "XMID",      "XLIST",  "XBDY", "XEXP",		"XBDY" };
-
-static int verbose = 0;
+#define HDRS_NB 10
+static const char * hdrs_emails[HDRS_NB] = { "uid", "subject", "from", "to",  "cc",  "bcc",  "messageid", "listid", "body", ""  };
+static const char * hdrs_xapian[HDRS_NB] = { "Q",   "S",       "A",    "XTO", "XCC", "XBCC", "XMID",      "XLIST",  "XBDY", "XBDY" };
 
 struct xapian_fts_backend
 {
 	struct fts_backend backend;
 	char * path = NULL;
-	char * base_path = NULL;
-	long partial,full;
 
 	char * guid;
 	char * boxname;
 	char * db;
+	char * expdb;
 
 	char * old_guid;
 	char * old_boxname;
@@ -48,9 +39,6 @@ struct xapian_fts_backend
 	long perf_nb;
 	long perf_uid;
 	long perf_dt;
-
-	long nb_pushes;
-	long max_push;
 };
 
 struct xapian_fts_backend_update_context
@@ -61,6 +49,13 @@ struct xapian_fts_backend_update_context
 	bool tbi_isfield;
 	uint32_t tbi_uid=0;
 };
+
+struct xapian_fts_optimize
+{
+	ARRAY(uint32_t) uids;
+};
+
+static struct fts_xapian_settings fts_xapian_settings;
 
 #include "fts-backend-xapian-functions.cpp"
 
@@ -76,91 +71,24 @@ static struct fts_backend *fts_backend_xapian_alloc(void)
 
 static int fts_backend_xapian_init(struct fts_backend *_backend, const char **error_r)
 {
+	(void)error_r;
+
 	struct xapian_fts_backend *backend = (struct xapian_fts_backend *)_backend;
-
-	if(verbose>0) i_info("fts_backend_xapian_init : %s",_backend->name);
-
-	const char *const *tmp, *env;
-	long len;
 
 	backend->db = NULL;
 	backend->dbw = NULL;
 
 	backend->guid = NULL;
 	backend->path = NULL;
-	backend->base_path = NULL;
 	backend->old_guid = NULL;
 	backend->old_boxname = NULL;
-	verbose = 0;
-	backend->partial = 0;
-	backend->full = 0;
 
-	backend->nb_pushes=0;
-	backend->max_push=0;
-
-	env = mail_user_plugin_getenv(_backend->ns->user, "fts_xapian");
-	if (env == NULL)
-	{
-		i_error("FTS Xapian: missing configuration");
-		return -1;
-	}
-
-	for (tmp = t_strsplit_spaces(env, " "); *tmp != NULL; tmp++)
-	{
-		if (strncmp(*tmp, "partial=",8)==0)
-		{
-			len=atol(*tmp + 8);
-			if(len>0) backend->partial=len;
-		}
-		else if (strncmp(*tmp,"full=",5)==0)
-		{
-			len=atol(*tmp + 5);
-			if(len>0) backend->full=len;
-		}
-		else if (strncmp(*tmp,"verbose=",8)==0)
-		{
-			len=atol(*tmp + 8);
-			if(len>0) verbose=len;
-		}
-		else if (strncmp(*tmp,"attachments=",12)==0)
-		{
-			// Legacy
-		}
-		else if (strncmp(*tmp,"base_path=",10)==0)
-		{
-			backend->base_path=i_strdup(*tmp + 10);
-		}
-		else
-		{
-			i_error("FTS Xapian: Invalid setting: %s", *tmp);
-			return -1;
-		}
-	}
-
-	if(backend->partial < 2)
-	{
-		i_error("FTS Xapian: 'partial' parameter is incorrect (%ld). Try 'partial=2'",backend->partial);
-		return -1;
-	}
-	if(backend->full<1)
-	{
-		i_error("FTS Xapian: 'full' parameter is incorrect (%ld). Try 'full=20'",backend->full);
-		return -1;
-	}
-	if(backend->partial > backend->full)
-	{
-		i_error("FTS Xapian: 'full' parameter must be equal or greater than 'partial'");
-		return -1;
-	}
-	if(backend->full > 50)
-	{
-		i_error("FTS Xapian: 'full' parameter above 50 is not realistic");
-		return -1;
-	}
+	struct fts_xapian_user *fuser = FTS_XAPIAN_USER_CONTEXT(_backend->ns->user);
+	fts_xapian_settings = fuser->set;
 
 	if(fts_backend_xapian_set_path(backend)<0) return -1;
 
-	if(verbose>0) i_info("FTS Xapian: Starting with partial=%ld full=%ld verbose=%d",backend->partial,backend->full,verbose);
+        if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Starting with partial=%ld full=%ld verbose=%d lowmemory=%ld MB vs freemem=%ld MB",fts_xapian_settings.partial,fts_xapian_settings.full,fts_xapian_settings.verbose,fts_xapian_settings.lowmemory, long(fts_backend_xapian_get_free_memory()/1024.0));
 
 	return 0;
 }
@@ -169,7 +97,7 @@ static void fts_backend_xapian_deinit(struct fts_backend *_backend)
 {
 	struct xapian_fts_backend *backend = (struct xapian_fts_backend *)_backend;
 
-	if(verbose>0) i_info("FTS Xapian: Deinit %s)",backend->path);
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Deinit %s)",backend->path);
 
 	if(backend->guid != NULL) fts_backend_xapian_unset_box(backend);
 
@@ -188,7 +116,7 @@ static void fts_backend_xapian_deinit(struct fts_backend *_backend)
 
 static int fts_backend_xapian_get_last_uid(struct fts_backend *_backend, struct mailbox *box, uint32_t *last_uid_r)
 {
-	if(verbose>0) i_info("FTS Xapian: fts_backend_xapian_get_last_uid");
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: fts_backend_xapian_get_last_uid");
 
 	struct xapian_fts_backend *backend = (struct xapian_fts_backend *)_backend;
 
@@ -204,7 +132,7 @@ static int fts_backend_xapian_get_last_uid(struct fts_backend *_backend, struct 
 
 	if(!fts_backend_xapian_open_readonly(backend, &dbr))
 	{
-		if(verbose>0) i_info("FTS Xapian: GetLastUID: Can not open db RO (%s)",backend->db);
+		if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: GetLastUID: Can not open db RO (%s)",backend->db);
 		return 0;
 	}
 
@@ -224,7 +152,7 @@ static int fts_backend_xapian_get_last_uid(struct fts_backend *_backend, struct 
 	dbr->close();
 	delete(dbr);
 
-	if(verbose>0) i_info("FTS Xapian: Get last UID of %s (%s) = %d",backend->boxname,backend->guid,*last_uid_r);
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Get last UID of %s (%s) = %d",backend->boxname,backend->guid,*last_uid_r);
 
 	return 0;
 }
@@ -232,7 +160,7 @@ static int fts_backend_xapian_get_last_uid(struct fts_backend *_backend, struct 
 
 static struct fts_backend_update_context * fts_backend_xapian_update_init(struct fts_backend *_backend)
 {
-	if(verbose>0) i_info("FTS Xapian: fts_backend_update_context");
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: fts_backend_update_context");
 
 	struct xapian_fts_backend_update_context *ctx;
 
@@ -246,7 +174,7 @@ static int fts_backend_xapian_update_deinit(struct fts_backend_update_context *_
 	struct xapian_fts_backend_update_context *ctx = (struct xapian_fts_backend_update_context *)_ctx;
 	struct xapian_fts_backend *backend = (struct xapian_fts_backend *)ctx->ctx.backend;
 
-	if(verbose>0) i_info("FTS Xapian: fts_backend_xapian_update_deinit (%s)",backend->path);
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: fts_backend_xapian_update_deinit (%s)",backend->path);
 
 	fts_backend_xapian_release(backend,"update_deinit",0);
 
@@ -257,7 +185,7 @@ static int fts_backend_xapian_update_deinit(struct fts_backend_update_context *_
 
 static void fts_backend_xapian_update_set_mailbox(struct fts_backend_update_context *_ctx, struct mailbox *box)
 {
-	if(verbose>0) i_info("FTS Xapian: fts_backend_xapian_update_set_mailbox");
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: fts_backend_xapian_update_set_mailbox");
 
 	struct xapian_fts_backend_update_context *ctx = (struct xapian_fts_backend_update_context *)_ctx;
 	struct xapian_fts_backend *backend = (struct xapian_fts_backend *)ctx->ctx.backend;
@@ -267,61 +195,42 @@ static void fts_backend_xapian_update_set_mailbox(struct fts_backend_update_cont
 
 static void fts_backend_xapian_update_expunge(struct fts_backend_update_context *_ctx, uint32_t uid)
 {
-	if(verbose>0) i_info("FTS Xapian: fts_backend_xapian_update_expunge");
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: fts_backend_xapian_update_expunge");
 
 	struct xapian_fts_backend_update_context *ctx = (struct xapian_fts_backend_update_context *)_ctx;
 	struct xapian_fts_backend *backend = (struct xapian_fts_backend *)ctx->ctx.backend;
 
-	if(!fts_backend_xapian_check_access(backend))
+	sqlite3 * expdb = NULL;
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Opening expunge DB(%s)",backend->expdb);
+
+	if(sqlite3_open(backend->expdb,&expdb))
 	{
-		i_error("FTS Xapian: Flagging UID=%d for expunge: Can not open db",uid);
-		return ;
+		i_error("FTS Xapian: Expunging (1) UID=%d : Can not open %s",uid,backend->expdb);
+		return;
 	}
-
-	try
+	const char * createTable = "CREATE TABLE IF NOT EXISTS docs(ID INT PRIMARY KEY NOT NULL);";
+	char *zErrMsg = 0;
+	if(sqlite3_exec(expdb,createTable,NULL,0,&zErrMsg) != SQLITE_OK )
 	{
-		if(verbose>0) i_info("FTS Xapian: Flagging UID=%d for expunge",uid);
-
-		XQuerySet * xq = new XQuerySet();
-		char *u = i_strdup_printf("%d",uid);
-		xq->add("uid",u);
-
-		XResultSet * result=fts_backend_xapian_query(backend->dbw,xq,1);
-
-		i_free(u);
-
-		if(result->size>0)
+		i_error("FTS Xapian: Expunging (2) UID=%d : Can not create table (%s) : %s",uid,createTable,zErrMsg);
+		sqlite3_free(zErrMsg);
+	}
+	else
+	{
+		char * u = i_strdup_printf("replace into docs values (%d)",uid);
+		if(sqlite3_exec(expdb,u,NULL,0,&zErrMsg) != SQLITE_OK)
 		{
-			Xapian::docid docid=result->data[0];
-			if(docid>0)
-			{
-				Xapian::Document doc = backend->dbw->get_document(docid);
-				try
-				{
-					doc.remove_term(hdrs_xapian[XAPIAN_EXPUNGE_HEADER]);
-				}
-				catch(Xapian::InvalidArgumentError e2)
-				{
-				}
-				u = i_strdup_printf("%s1",hdrs_xapian[XAPIAN_EXPUNGE_HEADER]);
-				doc.add_term(u);
-				backend->dbw->replace_document(docid,doc);
-				i_free(u);
-			}
+			i_error("FTS Xapian: Expunging (3) UID=%d : Can not add UID : %s",uid,zErrMsg);
+			sqlite3_free(zErrMsg);
 		}
-
-		delete(result);
-		delete(xq);
+		i_free(u);
 	}
-	catch(Xapian::Error e)
-	{
-		i_error("FTS Xapian: Expunging UID=%d %s",uid,e.get_msg().c_str());
-	}
+	sqlite3_close(expdb);
 }
 
 static bool fts_backend_xapian_update_set_build_key(struct fts_backend_update_context *_ctx, const struct fts_backend_build_key *key)
 {
-	if(verbose>1) i_info("FTS Xapian: fts_backend_xapian_update_set_build_key");
+	if(fts_xapian_settings.verbose>1) i_info("FTS Xapian: fts_backend_xapian_update_set_build_key");
 
 	struct xapian_fts_backend_update_context *ctx = (struct xapian_fts_backend_update_context *)_ctx;
 
@@ -332,7 +241,7 @@ static bool fts_backend_xapian_update_set_build_key(struct fts_backend_update_co
 
 	if(backend->guid == NULL)
 	{
-		if(verbose>0) i_warning("FTS Xapian: Build key %s with no mailbox",key->hdr_name);
+		if(fts_xapian_settings.verbose>0) i_warning("FTS Xapian: Build key %s with no mailbox",key->hdr_name);
 		return FALSE;
 	}
 
@@ -341,7 +250,7 @@ static bool fts_backend_xapian_update_set_build_key(struct fts_backend_update_co
 		fts_backend_xapian_oldbox(backend);
 		backend->old_guid = i_strdup(backend->guid);
 		backend->old_boxname = i_strdup(backend->boxname);
-		if(verbose>0) i_info("FTS Xapian: Start indexing '%s' (%s)",backend->boxname,backend->guid);
+		if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Start indexing '%s' (%s)",backend->boxname,backend->guid);
 	}
 
 	/* Performance calculator*/
@@ -360,7 +269,7 @@ static bool fts_backend_xapian_update_set_build_key(struct fts_backend_update_co
 			r=backend->perf_nb*1000.0;
 			r=r/dt;
 		}
-		if(verbose>0) i_info("FTS Xapian: Partial indexing '%s' (%ld msgs in %ld ms, rate: %.1f)",backend->boxname,backend->perf_nb,dt,r);
+		if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Partial indexing '%s' (%ld msgs in %ld ms, rate: %.1f)",backend->boxname,backend->perf_nb,dt,r);
 	}
 	/* End Performance calculator*/
 
@@ -368,19 +277,19 @@ static bool fts_backend_xapian_update_set_build_key(struct fts_backend_update_co
 	const char * type = key->body_content_type;
 	const char * disposition = key->body_content_disposition;
 
-	if(verbose>1) i_info("FTS Xapian: New part (Header=%s,Type=%s,Disposition=%s)",field,type,disposition);
+	if(fts_xapian_settings.verbose>1) i_info("FTS Xapian: New part (Header=%s,Type=%s,Disposition=%s)",field,type,disposition);
 
 	// Verify content-type
 
 	if(key->type == FTS_BACKEND_BUILD_KEY_BODY_PART_BINARY)
 	{
-		if(verbose>0) i_info("FTS Xapian: Skipping binary part of type '%s'",type);
+		if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Skipping binary part of type '%s'",type);
 		return FALSE;
 	}
 
 	if((type != NULL) && (strncmp(type,"text",4)!=0) && ((disposition==NULL) || ((strstr(disposition,"filename=")==NULL) && (strstr(disposition,"attachment")==NULL))))
 	{
-		if(verbose>0) i_info("FTS Xapian: Non-binary & non-text part of type '%s'",type);
+		if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Non-binary & non-text part of type '%s'",type);
 		return FALSE;
 	}
 
@@ -388,7 +297,7 @@ static bool fts_backend_xapian_update_set_build_key(struct fts_backend_update_co
 	ctx->isattachment=false;
 	if((disposition != NULL) && ((strstr(disposition,"filename=")!=NULL) || (strstr(disposition,"attachment")!=NULL)))
 	{
-		if(verbose>0) i_info("FTS Xapian: Found part as attachment of type '%s' and disposition '%s'",type,disposition);
+		if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Found part as attachment of type '%s' and disposition '%s'",type,disposition);
 		ctx->isattachment=true;
 	}
 
@@ -417,7 +326,7 @@ static bool fts_backend_xapian_update_set_build_key(struct fts_backend_update_co
 	}
 	if(i>=HDRS_NB)
 	{
-		if(verbose>1) i_info("FTS Xapian: Unknown header '%s' of part",ctx->tbi_field);
+		if(fts_xapian_settings.verbose>1) i_info("FTS Xapian: Unknown header '%s' of part",ctx->tbi_field);
 		i_free(ctx->tbi_field);
 		ctx->tbi_field=NULL;
 		return FALSE;
@@ -444,7 +353,7 @@ static void fts_backend_xapian_update_unset_build_key(struct fts_backend_update_
 {
 	struct xapian_fts_backend_update_context *ctx = (struct xapian_fts_backend_update_context *)_ctx;
 
-	if(verbose>0) 
+	if(fts_xapian_settings.verbose>0) 
 	{
 		long n = 0;
 		if( ctx->ctx.backend != NULL )
@@ -473,7 +382,7 @@ static void fts_backend_xapian_update_unset_build_key(struct fts_backend_update_
 
 static int fts_backend_xapian_refresh(struct fts_backend * _backend)
 {
-	if(verbose>0) i_info("FTS Xapian: fts_backend_xapian_refresh");
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: fts_backend_xapian_refresh");
 
 	struct xapian_fts_backend *backend = (struct xapian_fts_backend *) _backend;
 
@@ -487,14 +396,14 @@ static int fts_backend_xapian_update_build_more(struct fts_backend_update_contex
 	struct xapian_fts_backend_update_context *ctx = (struct xapian_fts_backend_update_context *)_ctx;
 	struct xapian_fts_backend *backend = (struct xapian_fts_backend *) ctx->ctx.backend;
 
-	if(verbose>1)
+	if(fts_xapian_settings.verbose>1)
 	{
 		if(ctx->isattachment)
 		{
-			char * t = i_strdup("NODATA");
-			if(data != NULL) { i_free(t); t = i_strndup(data,40); }
-			i_info("FTS Xapian: Indexing part as attachment (data like '%s')",t);
-			i_free(t);
+			//char * t = i_strdup("NODATA");
+			//if(data != NULL) { i_free(t); t = i_strndup(data,40); }
+			i_info("FTS Xapian: Indexing part as attachment");
+			//i_free(t);
 		}
 		else
 		{
@@ -508,7 +417,7 @@ static int fts_backend_xapian_update_build_more(struct fts_backend_update_contex
 
 	icu::StringPiece sp_d((const char *)data,(int32_t )size);
 	icu::UnicodeString d2 = icu::UnicodeString::fromUTF8(sp_d);
-	if(d2.length() < backend->partial) return 0;
+	if(d2.length() < fts_xapian_settings.partial) return 0;
 
 	if(!fts_backend_xapian_check_access(backend))
 	{
@@ -516,9 +425,9 @@ static int fts_backend_xapian_update_build_more(struct fts_backend_update_contex
 		return -1;
 	}
 
-	if(!fts_backend_xapian_test_memory(backend,d2.length()))
+	if(!fts_backend_xapian_test_memory())
 	{
-		if(verbose>0) i_info("FTS Xapian: Warning Low memory");
+		if(fts_xapian_settings.verbose>0) i_warning("FTS Xapian: Warning Low memory (%ld MB)",long(fts_backend_xapian_get_free_memory()/1024.0));
 		fts_backend_xapian_release(backend,"Low memory indexing", 0);
 		if(!fts_backend_xapian_check_access(backend))
 		{
@@ -534,7 +443,7 @@ static int fts_backend_xapian_update_build_more(struct fts_backend_update_contex
 		ok=fts_backend_xapian_index_hdr(backend,ctx->tbi_uid,ctx->tbi_field, &d2);
 		if(!ok)
 		{
-			if(verbose>0) i_info("FTS Xapian: Flushing memory and retrying");
+			if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Flushing memory and retrying");
 			fts_backend_xapian_release(backend,"Flushing memory indexing hdr", 0);
                 	if(fts_backend_xapian_check_access(backend))
 			{
@@ -551,7 +460,7 @@ static int fts_backend_xapian_update_build_more(struct fts_backend_update_contex
 		ok=fts_backend_xapian_index_text(backend,ctx->tbi_uid,ctx->tbi_field, &d2);
 		if(!ok)
 		{
-			if(verbose>0) i_info("FTS Xapian: Flushing memory and retrying");
+			if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Flushing memory and retrying");
 			fts_backend_xapian_release(backend,"Flushing memory indexing text", 0);
 			if(fts_backend_xapian_check_access(backend))
 			{
@@ -570,7 +479,7 @@ static int fts_backend_xapian_update_build_more(struct fts_backend_update_contex
 
 	if( (!ok) || (backend->commit_updates>XAPIAN_COMMIT_ENTRIES) || ((current_time - backend->commit_time) > XAPIAN_COMMIT_TIMEOUT*1000) )
 	{
-		if(verbose>0) i_info("FTS Xapian: Refreshing after %ld ms (vs %ld) and %ld updates (vs %ld) ...", current_time - backend->commit_time, XAPIAN_COMMIT_TIMEOUT*1000, backend->commit_updates, XAPIAN_COMMIT_ENTRIES);
+		if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Refreshing after %ld ms (vs %ld) and %ld updates (vs %ld) ...", current_time - backend->commit_time, XAPIAN_COMMIT_TIMEOUT*1000, backend->commit_updates, XAPIAN_COMMIT_ENTRIES);
 		fts_backend_xapian_release(backend,"refreshing", current_time);
 	}
 
@@ -578,45 +487,128 @@ static int fts_backend_xapian_update_build_more(struct fts_backend_update_contex
 	return 0;
 }
 
+static int fts_backend_xapian_optimize_callback(void *data, int argc, char **argv, char **azColName)
+{
+	uint32_t uid = atol(argv[0]);
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: fts_backend_xapian_optimize_callback : Adding %d",uid);
+	struct xapian_fts_optimize * uids = (struct xapian_fts_optimize *)data;
+	array_push_back(&uids->uids,&uid);
+	return 0;
+}
+	
 static int fts_backend_xapian_optimize(struct fts_backend *_backend)
 {
 	struct xapian_fts_backend *backend = (struct xapian_fts_backend *) _backend;
 
-	if(verbose>0) i_info("FTS Xapian: fts_backend_xapian_optimize '%s'",backend->path);
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: fts_backend_xapian_optimize '%s'",backend->path);
 
 	struct stat sb;
 	if(!( (stat(backend->path, &sb)==0) && S_ISDIR(sb.st_mode)))
 	{
-		if(verbose>0) i_error("FTS Xapian: Index folder inexistent");
+		if(fts_xapian_settings.verbose>0) i_error("FTS Xapian: Optimize(0) Index folder inexistent");
 		return -1;
 	}
 
+	Xapian::WritableDatabase * db = NULL;
+	sqlite3 * expdb = NULL;
 	DIR* dirp = opendir(backend->path);
 	struct dirent * dp;
 	char *s;
+	uint32_t uid;
+	int ret=0;
+	struct xapian_fts_optimize uids;	
+	const char * createTable = "CREATE TABLE IF NOT EXISTS docs(ID INT PRIMARY KEY NOT NULL);";
+	const char * selectUIDs = "select ID from docs;";
+	char *zErrMsg = 0;
 	while ((dp = readdir(dirp)) != NULL)
 	{
-		s = i_strdup_printf("%s/%s",backend->path,dp->d_name);
-
-		if((dp->d_type == DT_REG) && (strncmp(dp->d_name,"expunge_",8)==0))
+		if((dp->d_type == DT_DIR) && (strncmp(dp->d_name,"db_",3)==0))
 		{
-			if(verbose>0) i_info("Removing %s",s);
-			remove(s);
+			i_array_init(&(uids.uids),0);
+			s = i_strdup_printf("%s/%s_exp.db",backend->path,dp->d_name);
+			if(fts_xapian_settings.verbose>0) i_info("Optimize (1) %s : Checking expunges",s);
+			if(sqlite3_open(s,&expdb) == SQLITE_OK)
+			{
+				array_clear(&(uids.uids));
+				if(fts_xapian_settings.verbose>0) i_info("Optimize (1b) Executing %s",createTable);
+				if(sqlite3_exec(expdb,createTable,NULL,0,&zErrMsg) != SQLITE_OK )
+				{
+					i_error("FTS Xapian: Optimize (2) Can not create table (%s) : %s",createTable,zErrMsg);
+					sqlite3_free(zErrMsg);
+					ret=-1;
+				}
+				else
+				{
+					if(fts_xapian_settings.verbose>0) i_info("Optimize (1c) Executing %s",selectUIDs);
+					if(sqlite3_exec(expdb,selectUIDs,fts_backend_xapian_optimize_callback,&uids,&zErrMsg) != SQLITE_OK)	
+					{
+						i_error("FTS Xapian: Optimize (3) Can not select IDs : %s",selectUIDs,zErrMsg);
+						sqlite3_free(zErrMsg);
+						ret =-1;
+					}
+				}
+				i_free(s);
+				s = i_strdup_printf("%s/%s",backend->path,dp->d_name);
+				if(fts_xapian_settings.verbose>0) i_info("Optimize (5a) Opening Xapian DB (%s)",s);
+				try
+				{
+					db = new Xapian::WritableDatabase(s,Xapian::DB_CREATE_OR_OPEN | Xapian::DB_RETRY_LOCK | Xapian::DB_BACKEND_GLASS | Xapian::DB_NO_SYNC);
+					array_foreach_elem(&(uids.uids), uid)
+					{
+						if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Optimize (5) Removing DOC UID=%d",uid);
+						char * d = i_strdup_printf("delete from docs where ID=%d",uid);
+						try
+						{
+							XQuerySet * xq = new XQuerySet();
+        						char *u = i_strdup_printf("%d",uid);
+        						xq->add("uid",u);
+        						XResultSet * result=fts_backend_xapian_query(db,xq,1);
+							if(result->size>0)
+							{
+								Xapian::docid docid = result->data[0];
+								if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: Optimize (5) Removing DOC UID=%d (%s) DOCID=%d",uid,d,docid);
+								db->delete_document(docid);
+								if (sqlite3_exec(expdb,d,NULL,0,&zErrMsg) != SQLITE_OK )
+								{
+									i_error("FTS Xapian : Optimize Sqlite error %s",zErrMsg);
+									sqlite3_free(zErrMsg);
+								}
+							}
+							else
+							{
+								i_error("FTS Xapian: Optimize UID=%d inexistant",uid);
+							}
+							delete(result);
+							i_free(u);
+							delete(xq);
+						}
+						catch(Xapian::Error e)
+						{
+							i_error("FTS Xapian: Optimize (5a) %s",e.get_msg().c_str());
+						}
+						i_free(d);	
+					}
+					db->commit();
+					db->close();
+					delete(db);
+				}
+				catch(Xapian::Error e)
+				{
+					i_error("FTS Xapian: Optimize (6) %s",e.get_msg().c_str());
+				}
+				sqlite3_close(expdb);
+			}
+			array_free(&(uids.uids));
+			i_free(s);
 		}
-		else if((dp->d_type == DT_DIR) && (strncmp(dp->d_name,"db_",3)==0))
-		{
-			if(verbose>0) i_info("Expunging %s",s);
-			fts_backend_xapian_do_expunge(s);
-		}
-		i_free(s);
 	}
 	closedir(dirp);
-	return 0;
+	return ret;
 }
 
 static int fts_backend_xapian_rescan(struct fts_backend *_backend)
 {
-	if(verbose>0) i_info("FTS Xapian: fts_backend_xapian_rescan");
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: fts_backend_xapian_rescan");
 
 	struct xapian_fts_backend *backend = (struct xapian_fts_backend *) _backend;
 
@@ -636,7 +628,7 @@ static int fts_backend_xapian_rescan(struct fts_backend *_backend)
 
 		if((dp->d_type == DT_REG) && (strncmp(dp->d_name,"expunge_",8)==0))
 		{
-			if(verbose>0) i_info("Removing[1] %s",s);
+			if(fts_xapian_settings.verbose>0) i_info("Removing[1] %s",s);
 			remove(s);
 		}
 		else if((dp->d_type == DT_DIR) && (strncmp(dp->d_name,"db_",3)==0))
@@ -648,13 +640,13 @@ static int fts_backend_xapian_rescan(struct fts_backend *_backend)
 				s2 = i_strdup_printf("%s/%s",s,dp2->d_name);
 				if(dp2->d_type == DT_REG)
 				{
-					if(verbose>0) i_info("Removing[2] %s",s2);
+					if(fts_xapian_settings.verbose>0) i_info("Removing[2] %s",s2);
 					remove(s2);
 				}
 				i_free(s2);
 			}
 			closedir(d2);
-			if(verbose>0) i_info("Removing dir %s",s);
+			if(fts_xapian_settings.verbose>0) i_info("Removing dir %s",s);
 			remove(s);
 		}
 		i_free(s);
@@ -666,7 +658,7 @@ static int fts_backend_xapian_rescan(struct fts_backend *_backend)
 
 static int fts_backend_xapian_lookup(struct fts_backend *_backend, struct mailbox *box, struct mail_search_arg *args, enum fts_lookup_flags flags, struct fts_result *result)
 {
-	if(verbose>0) i_info("FTS Xapian: fts_backend_xapian_lookup");
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: fts_backend_xapian_lookup");
 
 	struct xapian_fts_backend *backend = (struct xapian_fts_backend *) _backend;
 
@@ -689,21 +681,21 @@ static int fts_backend_xapian_lookup(struct fts_backend *_backend, struct mailbo
 
 	if((flags & FTS_LOOKUP_FLAG_AND_ARGS) != 0)
 	{
-		if(verbose>1) i_info("FTS Xapian: FLAG=AND");
+		if(fts_xapian_settings.verbose>1) i_info("FTS Xapian: FLAG=AND");
 		is_and=true;
 	}
 	else
 	{
-		if(verbose>1) i_info("FTS Xapian: FLAG=OR");
+		if(fts_xapian_settings.verbose>1) i_info("FTS Xapian: FLAG=OR");
 	}
 
-	XQuerySet * qs = new XQuerySet(is_and,false,backend->partial);
+	XQuerySet * qs = new XQuerySet(is_and,false,fts_xapian_settings.partial);
 	fts_backend_xapian_build_qs(qs,args);
 
 	XResultSet * r=fts_backend_xapian_query(dbr,qs);
 
 	long n=r->size;
-	if(verbose>0) { i_info("FTS Xapian: QUery '%s' -> %ld results",qs->get_string().c_str(),n); }
+	if(fts_xapian_settings.verbose>0) { i_info("FTS Xapian: QUery '%s' -> %ld results",qs->get_string().c_str(),n); }
 
 	i_array_init(&(result->definite_uids),r->size);
 
@@ -727,14 +719,14 @@ static int fts_backend_xapian_lookup(struct fts_backend *_backend, struct mailbo
 	delete(dbr);
 
 	/* Performance calc */
-	if(verbose>0) i_info("FTS Xapian: %ld results in %ld ms",n,fts_backend_xapian_current_time() - current_time);
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: %ld results in %ld ms",n,fts_backend_xapian_current_time() - current_time);
 
 	return 0;
 }
 
 static int fts_backend_xapian_lookup_multi(struct fts_backend *_backend, struct mailbox *const boxes[], struct mail_search_arg *args, enum fts_lookup_flags flags, struct fts_multi_result *result)
 {
-	if(verbose>0) i_info("FTS Xapian: fts_backend_xapian_lookup_multi");
+	if(fts_xapian_settings.verbose>0) i_info("FTS Xapian: fts_backend_xapian_lookup_multi");
 
 	ARRAY(struct fts_result) box_results;
 
@@ -783,5 +775,7 @@ struct fts_backend fts_backend_xapian =
 		fts_backend_xapian_lookup,
 		fts_backend_xapian_lookup_multi,
 		NULL
-	}
+	},
+	.ns = NULL,
+//	.updating = 0
 };
